@@ -1,3 +1,5 @@
 torch
 transformers
 gradio
+accelerate
+sentencepiece
