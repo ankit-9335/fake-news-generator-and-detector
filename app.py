@@ -73,7 +73,7 @@ tab_check, tab_article, tab_generate = st.tabs(
 )
 
 with tab_check:
-    st.subheader("Check a claim against current news evidence")
+    st.subheader("Check a claim against current news and general knowledge")
     claim = st.text_area(
         "Claim or statement",
         height=180,
@@ -86,7 +86,7 @@ with tab_check:
             st.warning("Please enter a claim first.")
         else:
             try:
-                with st.spinner("Searching current news and comparing evidence..."):
+                with st.spinner("Searching evidence and comparing sources..."):
                     result = verify_claim(claim.strip())
 
                 verdict = result["verdict"]
@@ -108,19 +108,21 @@ with tab_check:
                 if result["articles"]:
                     st.subheader("Retrieved evidence")
                     for article in result["articles"]:
-                        with st.expander(f"{article['title']} — {article['source']}"):
+                        source_type = "General knowledge" if article.get("evidence_type") == "knowledge" else "News"
+                        with st.expander(f"{article['title']} — {article['source']} ({source_type})"):
                             st.write(article["description"] or "No snippet available.")
                             st.caption(
-                                f"Entailment: {article['entailment']:.1%} | "
-                                f"Contradiction: {article['contradiction']:.1%} | "
+                                f"Relevance: {article.get('relevance', 0):.1%} | "
+                                f"Entailment: {article.get('entailment', 0):.1%} | "
+                                f"Contradiction: {article.get('contradiction', 0):.1%} | "
                                 f"Published: {article['published']}"
                             )
                             st.link_button("Open source", article["url"])
                 else:
-                    st.info("No current news evidence was found for this claim.")
+                    st.info("No useful evidence was found for this claim.")
 
                 st.info(
-                    "NewsMorph compares the claim with retrieved news evidence. "
+                    "NewsMorph combines current news with general-knowledge evidence. "
                     "It is not a guaranteed fact-checker; verify important claims with authoritative sources."
                 )
             except Exception as exc:
@@ -189,4 +191,4 @@ with tab_generate:
                 st.exception(exc)
 
 st.divider()
-st.caption("NewsMorph | Python • Streamlit • Transformers • Google News RSS • NLI")
+st.caption("NewsMorph | Python • Streamlit • Transformers • Google News RSS • Wikipedia • NLI")
