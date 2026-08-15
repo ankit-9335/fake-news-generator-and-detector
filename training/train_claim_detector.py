@@ -2,9 +2,10 @@
 NewsMorph - Short Claim Detector
 
 Fine-tunes DistilBERT on the LIAR dataset for short factual claims.
-The original LIAR labels are six-way truthfulness labels. We deliberately
-collapse them into three classes for the app:
+The LIAR data is read from a public GitHub mirror of the original TSV files,
+because the Hugging Face copy currently relies on a legacy dataset script.
 
+Classes used by NewsMorph:
     FAKE      = false, barely-true, pants-fire
     UNCERTAIN = half-true
     REAL      = mostly-true, true
@@ -12,12 +13,14 @@ collapse them into three classes for the app:
 This is a claim classifier, NOT a live fact checker.
 """
 
+import csv
 import os
 import random
+import urllib.request
+
 import numpy as np
 import torch
-
-from datasets import load_dataset
+from datasets import Dataset, DatasetDict
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
@@ -37,19 +40,23 @@ TRAIN_BATCH_SIZE = 16
 EVAL_BATCH_SIZE = 32
 WEIGHT_DECAY = 0.01
 
-# LIAR's six labels:
-# 0 false, 1 half-true, 2 mostly-true, 3 true, 4 barely-true, 5 pants-fire
+# Original LIAR labels:
+# false, half-true, mostly-true, true, barely-true, pants-fire
 LABEL_MAP = {
-    0: 0,  # false -> FAKE
-    1: 1,  # half-true -> UNCERTAIN
-    2: 2,  # mostly-true -> REAL
-    3: 2,  # true -> REAL
-    4: 0,  # barely-true -> FAKE
-    5: 0,  # pants-fire -> FAKE
+    "false": 0,
+    "half-true": 1,
+    "mostly-true": 2,
+    "true": 2,
+    "barely-true": 0,
+    "pants-fire": 0,
 }
 
 ID2LABEL = {0: "FAKE", 1: "UNCERTAIN", 2: "REAL"}
 LABEL2ID = {v: k for k, v in ID2LABEL.items()}
+
+# This mirror contains the original LIAR train/valid/test TSV files.
+BASE_URL = "https://raw.githubusercontent.com/tfs4/liar_dataset/master/"
+DATA_DIR = "liar_data"
 
 
 def set_seed(seed=SEED):
@@ -58,6 +65,35 @@ def set_seed(seed=SEED):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def download_split(name):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    path = os.path.join(DATA_DIR, f"{name}.tsv")
+    if not os.path.exists(path):
+        url = BASE_URL + f"{name}.tsv"
+        print(f"Downloading {name}.tsv...")
+        urllib.request.urlretrieve(url, path)
+    return path
+
+
+def load_split(name):
+    path = download_split(name)
+    statements = []
+    labels = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f, delimiter="\t")
+        for row in reader:
+            if len(row) < 3:
+                continue
+            label = row[1].strip().lower()
+            statement = row[2].strip()
+            if label in LABEL_MAP and statement:
+                statements.append(statement)
+                labels.append(LABEL_MAP[label])
+
+    return Dataset.from_dict({"statement": statements, "labels": labels})
 
 
 def compute_metrics(eval_pred):
@@ -82,16 +118,17 @@ def main():
     else:
         print("WARNING: CUDA GPU not detected. Use Colab T4.")
 
-    print("Loading LIAR...")
-    # LIAR is a legacy dataset-loading script. Recent Hugging Face Datasets
-    # versions disable remote dataset scripts by default for security.
-    # We explicitly opt in because this is the trusted official dataset repo.
-    dataset = load_dataset("ucsbai/liar", trust_remote_code=True)
+    print("Loading LIAR TSV files...")
+    dataset = DatasetDict({
+        "train": load_split("train"),
+        "validation": load_split("valid"),
+        "test": load_split("test"),
+    })
 
-    def convert_label(example):
-        return {"labels": LABEL_MAP[int(example["label"])]}
-
-    dataset = dataset.map(convert_label)
+    print(
+        f"Dataset sizes: train={len(dataset['train'])}, "
+        f"validation={len(dataset['validation'])}, test={len(dataset['test'])}"
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
@@ -105,7 +142,7 @@ def main():
     tokenized = dataset.map(
         tokenize,
         batched=True,
-        remove_columns=dataset["train"].column_names,
+        remove_columns=["statement"],
     )
 
     model = AutoModelForSequenceClassification.from_pretrained(
