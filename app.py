@@ -7,13 +7,21 @@ st.set_page_config(
     layout="centered",
 )
 
-DETECTOR_MODEL = "mrm8488/bert-tiny-finetuned-fake-news-detection"
+# The previous detector was too small and its LABEL_0/LABEL_1 mapping was
+# not explicitly defined in the model config. That made our UI mapping unsafe.
+# This model explicitly documents LABEL_0 = Fake and LABEL_1 = Real and reports
+# 96.88% validation accuracy on its evaluation set.
+DETECTOR_MODEL = "ungjus/Fake_News_BERT_Classifier"
 GENERATOR_MODEL = "distilgpt2"
 
 
 @st.cache_resource(show_spinner="Loading fake-news detection model...")
 def load_detector():
-    return pipeline("text-classification", model=DETECTOR_MODEL)
+    return pipeline(
+        "text-classification",
+        model=DETECTOR_MODEL,
+        tokenizer=DETECTOR_MODEL,
+    )
 
 
 @st.cache_resource(show_spinner="Loading GPT-2 generator...")
@@ -23,13 +31,26 @@ def load_generator():
 
 def detect_news(text: str):
     classifier = load_detector()
-    result = classifier(text, truncation=True, max_length=512)[0]
-    label = result["label"].lower()
-    confidence = result["score"]
+    results = classifier(
+        text,
+        truncation=True,
+        max_length=512,
+        top_k=2,
+    )
 
-    # This model uses LABEL_1 for real and LABEL_0 for fake.
-    is_real = label in {"label_1", "real"}
-    return is_real, confidence
+    # Transformers may return either a list of dictionaries or a nested list
+    # depending on the installed pipeline version.
+    if results and isinstance(results[0], list):
+        results = results[0]
+
+    scores = {item["label"].upper(): float(item["score"]) for item in results}
+
+    fake_score = scores.get("LABEL_0", 0.0)
+    real_score = scores.get("LABEL_1", 0.0)
+
+    if fake_score >= real_score:
+        return "FAKE", fake_score, real_score
+    return "REAL", real_score, fake_score
 
 
 def generate_news(prompt: str):
@@ -53,6 +74,7 @@ st.caption(
     "Educational NLP demonstration — generated content should not be presented as real news."
 )
 
+# Keep the two functions separate so the app remains simple and easy to deploy.
 tab_detect, tab_generate = st.tabs(["🔍 Detect News", "✍️ Generate News"])
 
 with tab_detect:
@@ -69,13 +91,22 @@ with tab_detect:
             st.warning("Please enter some news content first.")
         else:
             try:
-                is_real, confidence = detect_news(text.strip())
-                if is_real:
+                prediction, confidence, opposite_confidence = detect_news(text.strip())
+
+                if prediction == "REAL":
                     st.success(f"🟢 Likely REAL — confidence: {confidence:.1%}")
                 else:
                     st.error(f"🔴 Likely FAKE — confidence: {confidence:.1%}")
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Fake probability", f"{(confidence if prediction == 'FAKE' else opposite_confidence):.1%}")
+                with col2:
+                    st.metric("Real probability", f"{(confidence if prediction == 'REAL' else opposite_confidence):.1%}")
+
                 st.info(
                     "This is a machine-learning prediction, not a fact-check. "
+                    "The model learns patterns from its training data and can still be wrong. "
                     "Verify important claims using reliable sources."
                 )
             except Exception as exc:
