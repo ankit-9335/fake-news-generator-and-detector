@@ -7,7 +7,7 @@ An educational NLP application that combines **fake-news detection** with **synt
 ## Features
 
 - 🔍 Fake/real news classification using a fine-tuned BERT Tiny model
-- ✍️ Synthetic news generation using GPT-2/DistilGPT-2
+- ✍️ Synthetic news generation using DistilGPT-2, a lightweight GPT-2-family model
 - 🌐 Streamlit web interface
 - ⚡ Models are cached so they are not reloaded on every interaction
 - ☁️ Ready for Streamlit Community Cloud deployment
@@ -19,7 +19,7 @@ An educational NLP application that combines **fake-news detection** with **synt
 - Hugging Face Transformers
 - PyTorch
 - BERT Tiny
-- GPT-2 family
+- DistilGPT-2
 
 ## Run Locally
 
@@ -65,11 +65,11 @@ fake-news-generator-and-detector/
 
 ## Model
 
-The detector uses `mrm8488/bert-tiny-finetuned-fake-news-detection`, a BERT Tiny model fine-tuned for fake-news detection. citehttps://huggingface.co/mrm8488/bert-tiny-finetuned-fake-news-detection
+The detector uses `mrm8488/bert-tiny-finetuned-fake-news-detection`, a BERT Tiny model fine-tuned for fake-news detection. The model is available on Hugging Face.
 
 ## Deployment
 
-This repository is configured for **Streamlit Community Cloud**. Select `app.py` as the application entry point and use the repository's `requirements.txt` during deployment.
+This repository is ready for **Streamlit Community Cloud**. Select `app.py` as the application entry point and use the repository's `requirements.txt` during deployment.
 
 ## Internship Context
 
