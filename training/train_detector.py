@@ -25,6 +25,7 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     confusion_matrix,
 )
+from sklearn.model_selection import train_test_split
 
 SEED = 42
 MODEL_NAME = "distilbert/distilbert-base-uncased"
@@ -85,22 +86,30 @@ def prepare_dataset():
     data = data.select(keep)
     print(f"Removed {before - len(data)} exact duplicates.")
 
-    split1 = data.train_test_split(
+    # Do stratification with scikit-learn instead of Dataset.train_test_split.
+    # This avoids a torchvision dependency issue in recent Colab environments.
+    indices = np.arange(len(data))
+    labels = np.array(data["label"])
+
+    train_val_idx, test_idx = train_test_split(
+        indices,
         test_size=TEST_SIZE,
-        seed=SEED,
-        stratify_by_column="label",
+        random_state=SEED,
+        stratify=labels,
     )
+
     relative_valid = VALID_SIZE / (1.0 - TEST_SIZE)
-    split2 = split1["train"].train_test_split(
+    train_idx, valid_idx = train_test_split(
+        train_val_idx,
         test_size=relative_valid,
-        seed=SEED,
-        stratify_by_column="label",
+        random_state=SEED,
+        stratify=labels[train_val_idx],
     )
 
     return DatasetDict(
-        train=split2["train"],
-        validation=split2["test"],
-        test=split1["test"],
+        train=data.select(train_idx.tolist()),
+        validation=data.select(valid_idx.tolist()),
+        test=data.select(test_idx.tolist()),
     )
 
 
