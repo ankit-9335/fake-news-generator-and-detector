@@ -1,16 +1,15 @@
 """
-NewsMorph - Short Claim Detector
+NewsMorph - Binary Short-Claim Detector
 
-Fine-tunes DistilBERT on the LIAR dataset for short factual claims.
-The LIAR data is read from a public GitHub mirror of the original TSV files,
-because the Hugging Face copy currently relies on a legacy dataset script.
+Fine-tunes RoBERTa on the LIAR short-statement dataset.
 
-Classes used by NewsMorph:
-    FAKE      = false, barely-true, pants-fire
-    UNCERTAIN = half-true
-    REAL      = mostly-true, true
+We intentionally REMOVE the ambiguous "half-true" examples instead of
+forcing them into FAKE or REAL. The remaining labels are:
+    FAKE = false, barely-true, pants-fire
+    REAL = mostly-true, true
 
-This is a claim classifier, NOT a live fact checker.
+This model is for classifying claim-like text patterns. It is NOT a live
+fact checker and cannot prove that a current event happened.
 """
 
 import csv
@@ -31,30 +30,27 @@ from transformers import (
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
 
 SEED = 42
-MODEL_NAME = "distilbert/distilbert-base-uncased"
+MODEL_NAME = "roberta-base"
 OUTPUT_DIR = "newsmorph-claim-detector"
 MAX_LENGTH = 128
 EPOCHS = 4
-LEARNING_RATE = 2e-5
+LEARNING_RATE = 1.5e-5
 TRAIN_BATCH_SIZE = 16
 EVAL_BATCH_SIZE = 32
 WEIGHT_DECAY = 0.01
 
-# Original LIAR labels:
-# false, half-true, mostly-true, true, barely-true, pants-fire
 LABEL_MAP = {
     "false": 0,
-    "half-true": 1,
-    "mostly-true": 2,
-    "true": 2,
+    "mostly-true": 1,
+    "true": 1,
     "barely-true": 0,
     "pants-fire": 0,
+    # half-true is deliberately excluded as ambiguous.
 }
 
-ID2LABEL = {0: "FAKE", 1: "UNCERTAIN", 2: "REAL"}
-LABEL2ID = {v: k for k, v in ID2LABEL.items()}
+ID2LABEL = {0: "FAKE", 1: "REAL"}
+LABEL2ID = {"FAKE": 0, "REAL": 1}
 
-# This mirror contains the original LIAR train/valid/test TSV files.
 BASE_URL = "https://raw.githubusercontent.com/tfs4/liar_dataset/master/"
 DATA_DIR = "liar_data"
 
@@ -87,11 +83,14 @@ def load_split(name):
         for row in reader:
             if len(row) < 3:
                 continue
-            label = row[1].strip().lower()
+            label_name = row[1].strip().lower()
             statement = row[2].strip()
-            if label in LABEL_MAP and statement:
-                statements.append(statement)
-                labels.append(LABEL_MAP[label])
+
+            if label_name not in LABEL_MAP or not statement:
+                continue
+
+            statements.append(statement)
+            labels.append(LABEL_MAP[label_name])
 
     return Dataset.from_dict({"statement": statements, "labels": labels})
 
@@ -100,7 +99,7 @@ def compute_metrics(eval_pred):
     logits, labels = eval_pred
     predictions = np.argmax(logits, axis=-1)
     precision, recall, f1, _ = precision_recall_fscore_support(
-        labels, predictions, average="weighted", zero_division=0
+        labels, predictions, average="binary", zero_division=0
     )
     return {
         "accuracy": accuracy_score(labels, predictions),
@@ -126,8 +125,10 @@ def main():
     })
 
     print(
-        f"Dataset sizes: train={len(dataset['train'])}, "
-        f"validation={len(dataset['validation'])}, test={len(dataset['test'])}"
+        f"Dataset sizes after removing half-true: "
+        f"train={len(dataset['train'])}, "
+        f"validation={len(dataset['validation'])}, "
+        f"test={len(dataset['test'])}"
     )
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -147,7 +148,7 @@ def main():
 
     model = AutoModelForSequenceClassification.from_pretrained(
         MODEL_NAME,
-        num_labels=3,
+        num_labels=2,
         id2label=ID2LABEL,
         label2id=LABEL2ID,
     )
@@ -182,7 +183,7 @@ def main():
         compute_metrics=compute_metrics,
     )
 
-    print("Starting LIAR claim fine-tuning...")
+    print("Starting binary LIAR claim fine-tuning...")
     trainer.train()
 
     print("\nValidation metrics:")
