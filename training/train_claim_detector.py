@@ -37,7 +37,7 @@ TRAIN_BATCH_SIZE = 16
 EVAL_BATCH_SIZE = 32
 WEIGHT_DECAY = 0.01
 
-# LIAR's official six labels:
+# LIAR's six labels:
 # 0 false, 1 half-true, 2 mostly-true, 3 true, 4 barely-true, 5 pants-fire
 LABEL_MAP = {
     0: 0,  # false -> FAKE
@@ -83,7 +83,10 @@ def main():
         print("WARNING: CUDA GPU not detected. Use Colab T4.")
 
     print("Loading LIAR...")
-    dataset = load_dataset("ucsbai/liar")
+    # LIAR is a legacy dataset-loading script. Recent Hugging Face Datasets
+    # versions disable remote dataset scripts by default for security.
+    # We explicitly opt in because this is the trusted official dataset repo.
+    dataset = load_dataset("ucsbai/liar", trust_remote_code=True)
 
     def convert_label(example):
         return {"labels": LABEL_MAP[int(example["label"])]}
