@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import html
 import re
-from urllib.parse import quote_plus, urlparse
+from functools import lru_cache
+from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 
 import requests
-from transformers import pipeline
+import torch
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 RSS_URL = "https://news.google.com/rss/search"
 NLI_MODEL = "cross-encoder/nli-MiniLM2-L6-H768"
@@ -38,8 +40,12 @@ def search_news(claim: str, max_results: int = 8) -> list[dict]:
         "gl": "IN",
         "ceid": "IN:en",
     }
-    response = requests.get(RSS_URL, params=params, timeout=12,
-                            headers={"User-Agent": "NewsMorph/1.0"})
+    response = requests.get(
+        RSS_URL,
+        params=params,
+        timeout=12,
+        headers={"User-Agent": "NewsMorph/1.0"},
+    )
     response.raise_for_status()
 
     root = ET.fromstring(response.content)
@@ -64,26 +70,40 @@ def search_news(claim: str, max_results: int = 8) -> list[dict]:
     return items
 
 
+@lru_cache(maxsize=1)
 def load_nli():
-    return pipeline(
-        "text-classification",
-        model=NLI_MODEL,
-        tokenizer=NLI_MODEL,
-        top_k=None,
+    """Load the NLI checkpoint once and reuse it for later claims."""
+    tokenizer = AutoTokenizer.from_pretrained(NLI_MODEL)
+    model = AutoModelForSequenceClassification.from_pretrained(NLI_MODEL)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+    return tokenizer, model, device
+
+
+def nli_scores(premise: str, hypothesis: str) -> dict:
+    """Return contradiction/entailment/neutral probabilities for a sentence pair."""
+    tokenizer, model, device = load_nli()
+
+    features = tokenizer(
+        premise,
+        hypothesis,
+        padding=True,
+        truncation=True,
+        max_length=256,
+        return_tensors="pt",
     )
+    features = {key: value.to(device) for key, value in features.items()}
 
+    with torch.no_grad():
+        logits = model(**features).logits
+        probabilities = torch.softmax(logits, dim=-1)[0].cpu().tolist()
 
-def _nli_scores(nli_output):
-    if nli_output and isinstance(nli_output[0], list):
-        nli_output = nli_output[0]
-    scores = {x["label"].lower(): float(x["score"]) for x in nli_output}
-
-    # The MiniLM NLI checkpoint exposes labels such as entailment,
-    # contradiction and neutral. Handle common capitalization variants.
+    # This checkpoint defines: 0=contradiction, 1=entailment, 2=neutral.
     return {
-        "entailment": scores.get("entailment", 0.0),
-        "contradiction": scores.get("contradiction", 0.0),
-        "neutral": scores.get("neutral", 0.0),
+        "contradiction": float(probabilities[0]),
+        "entailment": float(probabilities[1]),
+        "neutral": float(probabilities[2]),
     }
 
 
@@ -98,24 +118,22 @@ def verify_claim(claim: str, max_results: int = 8) -> dict:
             "contradiction": 0.0,
         }
 
-    nli = load_nli()
     scored = []
     for article in articles:
         evidence = f"{article['title']}. {article['description']}".strip()
-
-        # Claim -> evidence: entailment means the evidence is consistent with the claim;
-        # contradiction means the evidence conflicts with it.
-        result = nli(f"{claim}", evidence, truncation=True, max_length=256)
-        scores = _nli_scores(result)
-        article = {**article, **scores}
-        scored.append(article)
+        scores = nli_scores(claim, evidence)
+        scored.append({**article, **scores})
 
     # Reward multiple independent sources instead of one article.
     support = sum(max(0.0, a["entailment"] - a["contradiction"]) for a in scored)
     contradiction = sum(max(0.0, a["contradiction"] - a["entailment"]) for a in scored)
 
-    support_domains = len({a["domain"] for a in scored if a["entailment"] > a["contradiction"]})
-    contradiction_domains = len({a["domain"] for a in scored if a["contradiction"] > a["entailment"]})
+    support_domains = len({
+        a["domain"] for a in scored if a["entailment"] > a["contradiction"]
+    })
+    contradiction_domains = len({
+        a["domain"] for a in scored if a["contradiction"] > a["entailment"]
+    })
 
     support_score = support * (1 + min(support_domains, 4) * 0.15)
     contradiction_score = contradiction * (1 + min(contradiction_domains, 4) * 0.15)
