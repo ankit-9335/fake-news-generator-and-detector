@@ -8,7 +8,7 @@ st.set_page_config(
 )
 
 DETECTOR_MODEL = "mrm8488/bert-tiny-finetuned-fake-news-detection"
-GENERATOR_MODEL = "gpt2"
+GENERATOR_MODEL = "distilgpt2"
 
 
 @st.cache_resource(show_spinner="Loading fake-news detection model...")
@@ -49,9 +49,10 @@ def generate_news(prompt: str):
 
 
 st.title("📰 Fake News Generator & Detector")
-st.caption("Educational NLP demonstration — generated content should not be presented as real news.")
+st.caption(
+    "Educational NLP demonstration — generated content should not be presented as real news."
+)
 
-# Keep the two functions separate so the app remains simple and easy to deploy.
 tab_detect, tab_generate = st.tabs(["🔍 Detect News", "✍️ Generate News"])
 
 with tab_detect:
