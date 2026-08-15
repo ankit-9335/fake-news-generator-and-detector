@@ -1,7 +1,7 @@
 """NewsMorph evidence retrieval and claim verification.
 
 Evidence-assisted demo, not a replacement for professional fact-checking.
-It searches recent Google News RSS results and uses an NLI model to compare
+It searches recent Google News RSS results and uses NLI to compare relevant
 retrieved evidence with the user's claim.
 """
 
@@ -20,13 +20,21 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 RSS_URL = "https://news.google.com/rss/search"
 NLI_MODEL = "cross-encoder/nli-MiniLM2-L6-H768"
 
-# Claims containing these words are especially dangerous to verify from
-# semantically related search results. For them we also perform a current-status
-# search so that an unrelated "unknown gunmen" story cannot count as support.
 DEATH_TERMS = (
     "shot dead", "killed", "dead", "died", "assassinated", "murdered",
     "has died", "was killed", "was dead"
 )
+
+# Common words that carry little evidence value when measuring whether a
+# retrieved article is actually about the same claim.
+STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "to", "of", "in", "on", "at", "for", "from", "by", "with", "and", "or",
+    "as", "that", "this", "these", "those", "it", "its", "he", "she", "they",
+    "them", "his", "her", "their", "has", "have", "had", "will", "would",
+    "can", "could", "may", "might", "do", "does", "did", "not", "all", "any",
+    "about", "after", "before", "into", "than", "then", "there", "here",
+}
 
 
 def clean_html(text: str) -> str:
@@ -39,6 +47,27 @@ def domain(url: str) -> str:
         return urlparse(url).netloc.replace("www.", "")
     except Exception:
         return "unknown source"
+
+
+def _content_tokens(text: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return {w for w in words if len(w) > 2 and w not in STOPWORDS}
+
+
+def relevance_score(claim: str, evidence: str) -> float:
+    """Estimate whether an article is actually about the user's claim.
+
+    NLI contradiction is NOT enough by itself: an unrelated article can be
+    classified as contradiction even though it provides no evidence that the
+    claim is false. We therefore require meaningful lexical/topic overlap first.
+    """
+    claim_tokens = _content_tokens(claim)
+    evidence_tokens = _content_tokens(evidence)
+    if not claim_tokens or not evidence_tokens:
+        return 0.0
+
+    overlap = claim_tokens & evidence_tokens
+    return len(overlap) / len(claim_tokens)
 
 
 def _rss_search(query: str, max_results: int = 8) -> list[dict]:
@@ -90,7 +119,6 @@ def _dedupe(items: list[dict]) -> list[dict]:
 
 
 def _extract_subject(claim: str) -> str | None:
-    """Extract a likely named person/entity for a status search."""
     title_match = re.search(
         r"(?:Prime Minister|President|Chief Minister|Minister|PM)\s+"
         r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})",
@@ -108,15 +136,11 @@ def _extract_subject(claim: str) -> str | None:
 
 
 def search_news(claim: str, max_results: int = 8) -> list[dict]:
-    """Search recent news using several queries instead of one loose query."""
     queries = [
         f'"{claim}" when:7d',
         f"{claim} when:7d",
     ]
 
-    # For death/attack claims, search the subject's current activity separately.
-    # This is critical for claims such as "X was shot dead" when Google News
-    # otherwise returns unrelated stories containing words like "unknown gunmen".
     lower_claim = claim.lower()
     if any(term in lower_claim for term in DEATH_TERMS):
         subject = _extract_subject(claim)
@@ -132,7 +156,6 @@ def search_news(claim: str, max_results: int = 8) -> list[dict]:
         try:
             articles.extend(_rss_search(query, max_results=max_results))
         except Exception:
-            # One failed search should not kill the entire verification attempt.
             continue
 
     return _dedupe(articles)[: max_results * 2]
@@ -149,11 +172,8 @@ def load_nli():
 
 
 def nli_scores(premise: str, hypothesis: str) -> dict:
-    """Return contradiction/entailment/neutral probabilities for a pair."""
     tokenizer, model, device = load_nli()
 
-    # IMPORTANT: for NLI, the retrieved article is the premise and the user's
-    # claim is the hypothesis. Reversing these can change the result materially.
     features = tokenizer(
         premise,
         hypothesis,
@@ -168,8 +188,6 @@ def nli_scores(premise: str, hypothesis: str) -> dict:
         logits = model(**features).logits
         probabilities = torch.softmax(logits, dim=-1)[0].cpu().tolist()
 
-    # cross-encoder/nli-MiniLM2-L6-H768 defines:
-    # 0 = contradiction, 1 = entailment, 2 = neutral.
     return {
         "contradiction": float(probabilities[0]),
         "entailment": float(probabilities[1]),
@@ -178,7 +196,6 @@ def nli_scores(premise: str, hypothesis: str) -> dict:
 
 
 def _source_weight(article: dict) -> float:
-    """Give modest extra weight to well-established news/official sources."""
     domain_name = article["domain"].lower()
     trusted = (
         "reuters.com", "apnews.com", "bbc.com", "thehindu.com",
@@ -202,40 +219,66 @@ def verify_claim(claim: str, max_results: int = 8) -> dict:
     scored = []
     for article in articles:
         evidence = f"{article['title']}. {article['description']}".strip()
+        relevance = relevance_score(claim, evidence)
+
+        # Do not ask NLI to decide whether completely unrelated news proves a
+        # claim false. Keep the article visible for transparency, but exclude it
+        # from the evidence calculation.
+        if relevance < 0.20:
+            continue
+
         scores = nli_scores(evidence, claim)
         weight = _source_weight(article)
-        scored.append({**article, **scores, "source_weight": weight})
+        scored.append({
+            **article,
+            **scores,
+            "relevance": relevance,
+            "source_weight": weight,
+        })
 
-    # Ignore articles where the NLI model sees mostly neutral/unrelated text.
-    relevant = [
-        a for a in scored
-        if max(a["entailment"], a["contradiction"]) >= 0.45
-    ]
+    # Crucial rule: no relevant evidence means UNCERTAIN, not FALSE.
+    if not scored:
+        return {
+            "verdict": "UNCERTAIN",
+            "confidence": 0.0,
+            "articles": articles[:max_results],
+            "support": 0.0,
+            "contradiction": 0.0,
+        }
 
-    if not relevant:
-        relevant = scored
+    support = 0.0
+    contradiction = 0.0
 
-    support = sum(
-        max(0.0, a["entailment"] - a["contradiction"]) * a["source_weight"]
-        for a in relevant
-    )
-    contradiction = sum(
-        max(0.0, a["contradiction"] - a["entailment"]) * a["source_weight"]
-        for a in relevant
-    )
+    for article in scored:
+        # Require the NLI result itself to be reasonably confident before
+        # treating it as support/contradiction.
+        if article["entailment"] >= 0.55 and article["entailment"] > article["contradiction"]:
+            support += (
+                (article["entailment"] - article["contradiction"])
+                * article["relevance"]
+                * article["source_weight"]
+            )
+        elif article["contradiction"] >= 0.55 and article["contradiction"] > article["entailment"]:
+            contradiction += (
+                (article["contradiction"] - article["entailment"])
+                * article["relevance"]
+                * article["source_weight"]
+            )
 
     support_domains = len({
-        a["domain"] for a in relevant if a["entailment"] > a["contradiction"]
+        a["domain"] for a in scored
+        if a["entailment"] >= 0.55 and a["entailment"] > a["contradiction"]
     })
     contradiction_domains = len({
-        a["domain"] for a in relevant if a["contradiction"] > a["entailment"]
+        a["domain"] for a in scored
+        if a["contradiction"] >= 0.55 and a["contradiction"] > a["entailment"]
     })
 
     support_score = support * (1 + min(support_domains, 4) * 0.15)
     contradiction_score = contradiction * (1 + min(contradiction_domains, 4) * 0.15)
 
-    # Death claims get an additional safety check: current reporting that the
-    # named person is actively speaking/appearing is strong counter-evidence.
+    # For death claims, current activity by the named person is useful
+    # counter-evidence, but only if the status article is itself relevant.
     if any(term in claim.lower() for term in DEATH_TERMS):
         subject = _extract_subject(claim)
         if subject:
@@ -249,20 +292,24 @@ def verify_claim(claim: str, max_results: int = 8) -> dict:
                 except Exception:
                     pass
 
-            status_articles = _dedupe(status_articles)
-            for article in status_articles:
+            for article in _dedupe(status_articles):
                 evidence = f"{article['title']}. {article['description']}".strip()
+                relevance = relevance_score(claim, evidence)
+                if relevance < 0.20:
+                    continue
+
                 scores = nli_scores(evidence, claim)
-                # A current article directly contradicting a death claim is
-                # stronger than an unrelated article that merely shares words.
-                if scores["contradiction"] > scores["entailment"]:
+                if (
+                    scores["contradiction"] >= 0.55
+                    and scores["contradiction"] > scores["entailment"]
+                ):
                     contradiction_score += (
                         scores["contradiction"] - scores["entailment"]
-                    ) * _source_weight(article) * 1.5
+                    ) * relevance * _source_weight(article) * 1.5
 
     total = support_score + contradiction_score
 
-    if total < 0.9:
+    if total < 0.35:
         verdict = "UNCERTAIN"
     elif contradiction_score > support_score * 1.20 and contradiction_domains >= 1:
         verdict = "LIKELY FALSE"
@@ -278,7 +325,7 @@ def verify_claim(claim: str, max_results: int = 8) -> dict:
         "confidence": confidence,
         "articles": sorted(
             scored,
-            key=lambda a: max(a["entailment"], a["contradiction"]),
+            key=lambda a: (a["relevance"] * max(a["entailment"], a["contradiction"])),
             reverse=True,
         )[:max_results],
         "support": support_score,
