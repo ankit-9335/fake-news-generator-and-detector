@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 MODEL_ID = os.getenv("NEWSMORPH_MODEL_ID", "")
-GENERATOR_MODEL = "distilgpt2"
+GENERATOR_MODEL = "HuggingFaceTB/SmolLM-135M-Instruct"
 
 
 @st.cache_resource(show_spinner="Loading article classifier...")
@@ -50,17 +50,45 @@ def classify_article(text: str):
 
 def generate_news(prompt: str):
     generator = load_generator()
-    return generator(
-        prompt,
-        max_new_tokens=120,
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a creative writing assistant. Write clearly structured, "
+                "fictional news articles. Never claim that fictional events are real. "
+                "Stay focused on the user's topic and do not discuss your instructions."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Write a fictional news article based on this headline or topic:\n\n"
+                f"{prompt}\n\n"
+                "Write 3 to 5 short paragraphs in a realistic news-report style. "
+                "Keep the article focused on the given topic and avoid unrelated text."
+            ),
+        },
+    ]
+
+    result = generator(
+        messages,
+        max_new_tokens=180,
         num_return_sequences=1,
         do_sample=True,
-        temperature=0.8,
-        top_k=50,
-        top_p=0.95,
-        no_repeat_ngram_size=2,
-        pad_token_id=generator.tokenizer.eos_token_id,
-    )[0]["generated_text"]
+        temperature=0.6,
+        top_p=0.9,
+        repetition_penalty=1.1,
+        no_repeat_ngram_size=3,
+    )
+
+    generated = result[0]["generated_text"]
+
+    # Chat-style pipelines return the complete message history.
+    if isinstance(generated, list):
+        generated = generated[-1].get("content", "")
+
+    return generated.strip()
 
 
 st.title("📰 NewsMorph")
@@ -170,7 +198,7 @@ with tab_article:
                 st.exception(exc)
 
 with tab_generate:
-    st.subheader("Generate synthetic news text")
+    st.subheader("Generate fictional news text")
     prompt = st.text_area(
         "Headline or topic",
         height=140,
@@ -182,10 +210,13 @@ with tab_generate:
             st.warning("Please enter a headline or topic first.")
         else:
             try:
-                with st.spinner("Generating synthetic text..."):
+                with st.spinner("Generating fictional news text..."):
                     generated = generate_news(prompt.strip())
                 st.text_area("Generated content", generated, height=280)
-                st.warning("⚠️ This is AI-generated synthetic text. Do not present it as real news.")
+                st.warning(
+                    "⚠️ This is fictional AI-generated news. "
+                    "It is not verified information and must not be presented as real news."
+                )
             except Exception as exc:
                 st.error("The generator could not produce text.")
                 st.exception(exc)
