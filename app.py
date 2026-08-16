@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 MODEL_ID = os.getenv("NEWSMORPH_MODEL_ID", "")
-GENERATOR_MODEL = "HuggingFaceTB/SmolLM-135M-Instruct"
+GENERATOR_MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct"
 
 
 @st.cache_resource(show_spinner="Loading article classifier...")
@@ -84,7 +84,6 @@ def generate_news(prompt: str):
 
     generated = result[0]["generated_text"]
 
-    # Chat-style pipelines return the complete message history.
     if isinstance(generated, list):
         generated = generated[-1].get("content", "")
 
